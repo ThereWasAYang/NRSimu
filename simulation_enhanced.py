@@ -54,8 +54,10 @@ class NREnhancedSimulation:
         # 创建信道
         channel = NRChannel(snr_db=snr_db, channel_type=self.channel_type)
         
-        # 1. 发射
-        tx_signal, tx_bits = self.tx.transmit(num_bits)
+        # 1. 发射（增加比特数以补偿导频开销）
+        # 导频占用 1/4 的子载波
+        num_bits_with_overhead = int(num_bits * 4 / 3)
+        tx_signal, tx_bits = self.tx.transmit(num_bits_with_overhead)
         
         # 2. 通过信道
         rx_signal, h_true = channel.apply_channel(tx_signal)

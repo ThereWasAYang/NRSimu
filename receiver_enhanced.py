@@ -145,20 +145,20 @@ class NRReceiverEnhanced:
     
     def generate_pilot_pattern(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        生成导频图案
+        生成导频图案（与发射机匹配）
         
         Returns:
             (导频位置索引, 导频值)
         """
-        # 导频间隔：每4个子载波放一个导频
+        # 导频间隔：每4个子载波放一个导频（与发射机一致）
         pilot_spacing = 4
         pilot_indices = np.arange(0, self.num_subcarriers, pilot_spacing)
         
-        # 生成已知导频序列（BPSK）
+        # 生成已知导频序列（BPSK）- 必须与发射机完全一致
         np.random.seed(42)  # 固定种子，确保收发一致
         pilot_values = 2 * np.random.randint(0, 2, len(pilot_indices)) - 1
         
-        return pilot_indices, pilot_values
+        return pilot_indices, pilot_values.astype(complex)
     
     def channel_estimate_ls(self, rx_symbols: np.ndarray, pilot_indices: np.ndarray, 
                            pilot_values: np.ndarray) -> np.ndarray:

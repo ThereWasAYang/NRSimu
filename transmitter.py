@@ -100,12 +100,49 @@ class NRTransmitter:
         else:
             return self.qpsk_modulate(bits)
     
-    def ofdm_modulate(self, symbols: np.ndarray) -> np.ndarray:
+    def generate_pilots(self, num_pilots: int = None) -> np.ndarray:
         """
-        OFDM调制
+        生成导频序列（与接收机一致）
+        
+        Args:
+            num_pilots: 导频数量，默认为子载波数的1/4
+            
+        Returns:
+            导频符号
+        """
+        if num_pilots is None:
+            num_pilots = self.num_subcarriers // 4
+        
+        # 使用固定种子，确保收发一致
+        np.random.seed(42)
+        # BPSK导频
+        pilots = 2 * np.random.randint(0, 2, num_pilots) - 1
+        return pilots.astype(complex)
+    
+    def insert_pilots(self, data_symbols: np.ndarray, pilot_indices: np.ndarray, 
+                     pilot_values: np.ndarray) -> np.ndarray:
+        """
+        在数据符号中插入导频
+        
+        Args:
+            data_symbols: 数据符号
+            pilot_indices: 导频位置
+            pilot_values: 导频值
+            
+        Returns:
+            插入导频后的符号
+        """
+        ofdm_symbol = np.array(data_symbols, dtype=complex)
+        ofdm_symbol[pilot_indices] = pilot_values
+        return ofdm_symbol
+    
+    def ofdm_modulate(self, symbols: np.ndarray, insert_pilots: bool = True) -> np.ndarray:
+        """
+        OFDM调制（支持导频插入）
         
         Args:
             symbols: 频域符号
+            insert_pilots: 是否插入导频
             
         Returns:
             时域OFDM信号
@@ -114,11 +151,20 @@ class NRTransmitter:
         num_symbols_per_ofdm = self.num_subcarriers
         num_ofdm_symbols = num_symbols_total // num_symbols_per_ofdm
         
+        # 导频配置（与接收机匹配）
+        pilot_spacing = 4
+        pilot_indices = np.arange(0, self.num_subcarriers, pilot_spacing)
+        pilot_values = self.generate_pilots(len(pilot_indices))
+        
         ofdm_signal = []
         
         for i in range(num_ofdm_symbols):
             # 提取当前OFDM符号的频域数据
             freq_data = symbols[i*num_symbols_per_ofdm:(i+1)*num_symbols_per_ofdm]
+            
+            # 插入导频
+            if insert_pilots:
+                freq_data = self.insert_pilots(freq_data, pilot_indices, pilot_values)
             
             # 零填充到FFT大小
             fft_size = self.num_subcarriers
