@@ -151,6 +151,10 @@ class NRReceiverFixed:
         """完整接收流程"""
         results = {}
         
+        # 清空星座图数据（防止多次调用时累积）
+        self.constellation_before_eq = []
+        self.constellation_after_eq = []
+        
         # 1. OFDM解调
         ofdm_symbols = self.ofdm_demodulate(rx_signal)
         num_ofdm = len(ofdm_symbols) // self.num_subcarriers
