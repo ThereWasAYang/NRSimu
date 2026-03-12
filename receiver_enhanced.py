@@ -163,7 +163,7 @@ class NRReceiverEnhanced:
     def channel_estimate_ls(self, rx_symbols: np.ndarray, pilot_indices: np.ndarray, 
                            pilot_values: np.ndarray) -> np.ndarray:
         """
-        LS信道估计（最小二乘）
+        LS信道估计（最小二乘）+ 线性插值
         
         Args:
             rx_symbols: 接收的频域符号
@@ -187,6 +187,13 @@ class NRReceiverEnhanced:
         h_est_real = np.interp(all_indices, pilot_indices, np.real(h_pilots))
         h_est_imag = np.interp(all_indices, pilot_indices, np.imag(h_pilots))
         h_est = h_est_real + 1j * h_est_imag
+        
+        # 对估计结果进行平滑（低通滤波）
+        window_size = 5
+        if len(h_est) >= window_size:
+            h_est_smooth = np.convolve(h_est, np.ones(window_size)/window_size, mode='same')
+            # 边界处理：保留原始估计
+            h_est[window_size//2:-window_size//2] = h_est_smooth[window_size//2:-window_size//2]
         
         return h_est
     
@@ -345,19 +352,32 @@ class NRReceiverEnhanced:
             end = start + symbols_per_ofdm
             ofdm_symbol = self.ofdm_symbols[start:end]
             
-            # 保存均衡前的星座点
-            self.constellation_before_eq.extend(ofdm_symbol)
-            
             # LS信道估计
             h_est = self.channel_estimate_ls(ofdm_symbol, pilot_indices, pilot_values)
             channel_ests_all.extend(h_est)
             
+            # 改进的MMSE均衡 - 使用更精确的噪声估计
+            # 估计噪声方差
+            rx_pilots = ofdm_symbol[pilot_indices]
+            tx_pilots = pilot_values
+            noise_var_est = np.mean(np.abs(rx_pilots - tx_pilots * h_est[pilot_indices])**2)
+            noise_var_est = max(noise_var_est, 1e-10)  # 防止除零
+            
             # MMSE均衡
-            eq_symbol = self.equalize_mmse(ofdm_symbol, h_est, noise_var=10**(-snr_db/10))
+            eq_symbol = self.equalize_mmse(ofdm_symbol, h_est, noise_var=noise_var_est)
+            
+            # 功率归一化 - 保持与发射功率一致
+            tx_power = 1.0  # 假设发射功率为1
+            eq_power = np.mean(np.abs(eq_symbol)**2)
+            if eq_power > 0:
+                eq_symbol = eq_symbol * np.sqrt(tx_power / eq_power)
+            
             equalized_all.extend(eq_symbol)
             
-            # 保存均衡后的星座点
-            self.constellation_after_eq.extend(eq_symbol)
+            # 保存星座点（只保存数据子载波，不包括导频）
+            data_indices = np.setdiff1d(np.arange(self.num_subcarriers), pilot_indices)
+            self.constellation_before_eq.extend(ofdm_symbol[data_indices])
+            self.constellation_after_eq.extend(eq_symbol[data_indices])
         
         self.equalized_symbols = np.array(equalized_all)
         self.channel_estimates = np.array(channel_ests_all)
@@ -373,63 +393,86 @@ class NRReceiverEnhanced:
     
     def plot_constellation(self, save_path: str = 'constellation.png'):
         """
-        绘制星座图
+        绘制星座图对比
         
         包括：
         - 均衡前的星座点（接收信号）
         - 均衡后的星座点
         - 理想的参考星座点
+        - EVM统计信息
         """
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
         
+        # 获取数据
+        before_eq = np.array(self.constellation_before_eq[:1000])
+        after_eq = np.array(self.constellation_after_eq[:1000])
+        
+        # 计算EVM
+        if self.modulation == 'QPSK':
+            ref_points = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
+        elif self.modulation == '16QAM':
+            ref_points = np.array([i+1j*q for i in [-3,-1,1,3] for q in [-3,-1,1,3]]) / np.sqrt(10)
+        else:
+            ref_points = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
+        
+        # 计算均衡前后的EVM
+        def calc_evm(symbols, refs):
+            # 找到每个符号最近的参考点
+            evm_vals = []
+            for s in symbols:
+                min_err = min(np.abs(s - r)**2 for r in refs)
+                evm_vals.append(min_err)
+            return np.sqrt(np.mean(evm_vals)) / np.sqrt(np.mean(np.abs(refs)**2)) * 100
+        
+        evm_before = calc_evm(before_eq, ref_points)
+        evm_after = calc_evm(after_eq, ref_points)
+        
         # 1. 均衡前的星座图
         ax1 = axes[0]
-        before_eq = np.array(self.constellation_before_eq[:1000])  # 取前1000个点
         ax1.scatter(np.real(before_eq), np.imag(before_eq), 
                    c='blue', alpha=0.5, s=10, label='Received')
+        ax1.scatter(np.real(ref_points), np.imag(ref_points), 
+                   c='red', s=150, marker='*', edgecolors='black', linewidths=1, 
+                   label='Ideal', zorder=5)
         ax1.axhline(y=0, color='k', linestyle='--', alpha=0.3)
         ax1.axvline(x=0, color='k', linestyle='--', alpha=0.3)
         ax1.set_xlabel('In-Phase', fontsize=11)
         ax1.set_ylabel('Quadrature', fontsize=11)
-        ax1.set_title('Before Equalization', fontsize=12)
+        ax1.set_title(f'Before Equalization\nEVM = {evm_before:.2f}%', fontsize=12)
         ax1.grid(True, alpha=0.3)
         ax1.set_aspect('equal')
+        ax1.legend()
         
         # 2. 均衡后的星座图
         ax2 = axes[1]
-        after_eq = np.array(self.constellation_after_eq[:1000])
         ax2.scatter(np.real(after_eq), np.imag(after_eq), 
                    c='green', alpha=0.5, s=10, label='Equalized')
+        ax2.scatter(np.real(ref_points), np.imag(ref_points), 
+                   c='red', s=150, marker='*', edgecolors='black', linewidths=1,
+                   label='Ideal', zorder=5)
         ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
         ax2.axvline(x=0, color='k', linestyle='--', alpha=0.3)
         ax2.set_xlabel('In-Phase', fontsize=11)
         ax2.set_ylabel('Quadrature', fontsize=11)
-        ax2.set_title('After Equalization', fontsize=12)
+        ax2.set_title(f'After Equalization\nEVM = {evm_after:.2f}%', fontsize=12)
         ax2.grid(True, alpha=0.3)
         ax2.set_aspect('equal')
+        ax2.legend()
         
-        # 3. 理想的参考星座图
+        # 3. 对比图
         ax3 = axes[2]
-        if self.modulation == 'QPSK':
-            ref_points = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
-        elif self.modulation == '16QAM':
-            ref_points = []
-            for i in [-3, -1, 1, 3]:
-                for q in [-3, -1, 1, 3]:
-                    ref_points.append(i + 1j*q)
-            ref_points = np.array(ref_points) / np.sqrt(10)
-        else:
-            ref_points = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
-        
+        ax3.scatter(np.real(before_eq[:200]), np.imag(before_eq[:200]), 
+                   c='blue', alpha=0.4, s=15, label=f'Before (EVM={evm_before:.1f}%)')
+        ax3.scatter(np.real(after_eq[:200]), np.imag(after_eq[:200]), 
+                   c='green', alpha=0.6, s=15, label=f'After (EVM={evm_after:.1f}%)')
         ax3.scatter(np.real(ref_points), np.imag(ref_points), 
-                   c='red', s=100, marker='*', label='Ideal', zorder=5)
-        ax3.scatter(np.real(after_eq[:100]), np.imag(after_eq[:100]), 
-                   c='green', alpha=0.3, s=10, label='Equalized')
+                   c='red', s=150, marker='*', edgecolors='black', linewidths=1,
+                   label='Ideal', zorder=5)
         ax3.axhline(y=0, color='k', linestyle='--', alpha=0.3)
         ax3.axvline(x=0, color='k', linestyle='--', alpha=0.3)
         ax3.set_xlabel('In-Phase', fontsize=11)
         ax3.set_ylabel('Quadrature', fontsize=11)
-        ax3.set_title(f'Ideal {self.modulation} Constellation', fontsize=12)
+        ax3.set_title(f'Comparison - {self.modulation}', fontsize=12)
         ax3.grid(True, alpha=0.3)
         ax3.set_aspect('equal')
         ax3.legend()
@@ -437,6 +480,9 @@ class NRReceiverEnhanced:
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"星座图已保存到: {save_path}")
+        print(f"  EVM Before: {evm_before:.2f}%")
+        print(f"  EVM After:  {evm_after:.2f}%")
+        print(f"  改善: {evm_before-evm_after:.2f}%")
         plt.close()
     
     def plot_channel_response(self, save_path: str = 'channel_response.png'):
